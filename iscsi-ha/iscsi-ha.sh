@@ -242,7 +242,7 @@ then
 			log "DRBD Resource: $resource in [$D_STATE] disk state"
 			echo "DRBD Disk State:	$resource in $D_STATE disk state" >> $STATUS
 		fi
-		unset D_STATE
+		unset $D_STATE
 	done
 	IFS=$RESTORE_IFS	
 
