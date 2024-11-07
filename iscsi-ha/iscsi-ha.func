@@ -1,0 +1,753 @@
+#!/bin/bash
+##################################
+# iSCSI-HA version 2.2.7
+##################################
+#################################################################################
+#                                                                               #
+# iscsi-ha - High Availability framework for iSCSI cluster used in conjunction  #
+# with XAPI based Xen Virtualization Environment (Xen Cloud Platform/XenServer) #
+# Copyright 2015 Salvatore Costantino                                           #
+# ha@pulsesupply.com                                                            #
+#                                                                               #
+#                                                                               #
+#    iscsi-ha is free software: you can redistribute it and/or modify           #
+#    it under the terms of the GNU General Public License as published by       #
+#    the Free Software Foundation, either version 3 of the License, or          #
+#    (at your option) any later version.                                        #
+#                                                                               #
+#    iscsi-ha is distributed in the hope that it will be useful,                #
+#    but WITHOUT ANY WARRANTY; without even the implied warranty of             #
+#    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the              #
+#    GNU General Public License for more details.                               #
+#                                                                               #
+#    You should have received a copy of the GNU General Public License          #
+#    along with iscsi-ha.  If not, see <http://www.gnu.org/licenses/>.          #
+#                                                                               #
+#################################################################################
+
+function check_logger_processes () {
+	log $FUNCNAME "Checking logger processes"
+	LOG_PROCESS_COUNT=`ps aux | grep $PROG_NAME.sh | wc -l`
+	if [ $LOG_PROCESS_COUNT -gt 20 ]
+	then
+		log $FUNCNAME "$LOG_PROCESS_COUNT log processes found, threshhold is 20"
+		LOG_PIDS=`ps aux | grep $PROG_NAME.sh | awk '{print $2}'`
+		log $FUNCNAME "Killing PIDs $LOG_PIDS"
+		for i in ${LOG_PIDS[@]}
+		do
+			kill $i
+			if [ $? -ne 0 ]
+			then
+				log $FUNCNAME "Failed to kill PID $i"
+			else
+				log $FUNCNAME "Successfully killed PID $i"
+			fi
+		done
+	else
+		log $FUNCNAME "No processes to clear"
+	fi
+} # End function check_logger_processes
+
+function local_ip_list () {
+	LOCAL_IP_LIST=$($IP addr show | $GREP inet | $AWK -F "inet " {'print $2'} | $AWK -F "/" {'print $1'})
+	if [ $? -ne 0 ]
+	then
+		log "Error retrieving local IP list on $HOST"
+		return $?
+	else
+		log "$FUNCNAME: Local IP list returned ${LOCAL_IP_LIST[@]}"
+		return 0
+	fi	
+} # End function local_ip_list
+
+function check_ip_health () {
+	$PING -c $2 -w 1 $1 1> /dev/null
+	if [ $? -eq 0 ]
+	then
+		log "$FUNCNAME: $1 response = OK"
+		return 0
+	else
+		log "$FUNCNAME: $1 response = FAIL"
+		email "$FUNCNAME: [$1] response = FAIL" "1"
+		return 1
+	fi	
+}
+function mask_numbits () {
+	BITS=0
+	local COUNT=0
+	RESTORE_IFS=$IFS
+	IFS=.
+	for octet in $1
+	do
+		BYTE=
+		COUNT=$((COUNT+1))
+		
+		case $octet in
+			255)
+				local BYTE=255
+				(( BITS += 8 ))
+				;;
+			254)
+				local BYTE=254
+				(( BITS += 7 ))
+				;;
+			252)
+				local BYTE=252
+				(( BITS += 6 ))
+				;;
+			248)
+				local BYTE=248
+				(( BITS += 5 ))
+				;;
+			240)
+				local BYTE=240
+				(( BITS += 4 ))
+				;;
+			224)
+				local BYTE=224
+				(( BITS += 3 ))
+				;;
+			192)
+				local BYTE=192
+				(( BITS += 2 ))
+				;;
+			128)
+				local BYTE=128
+				(( BITS += 1 ))
+				;;
+			0)	
+				local ZERO=true
+				;;
+			*)
+				log "$FUNCNAME: Invalid Subnet Mask [$1]. Check Configuration."
+				email "$FUNCNAME: Invalid Subnet Mask [$1]. Check Configuration." "1"
+				ERROR=1
+				;;
+		esac
+
+		if [ "$ZERO" = "true" ] && [ -n "$BYTE"  ]
+		then
+			log "$FUNCNAME: Invalid Subnet Mask [$1]. Check Configuration."
+			email "$FUNCNAME: Invalid Subnet Mask [$1]. Check Configuration." "1"
+			ERROR=1
+			break
+		fi
+	done
+	
+	IFS=$RESTORE_IFS
+	
+	if [ "$ERROR" = "1" ]
+	then
+		return 1
+	else
+		log "$FUNCNAME: Mask $1 contains $BITS bits."
+		return 0
+	fi
+} #End function mask_numbits
+
+function check_drbd_resource_state () {
+	ROLE=`$DRBDADM role $1 | $AWK -F "/" {'print $1'}`
+	if [ "$ROLE" = "$2" ]
+	then
+		log "$FUNCNAME: DRBD Resource: $1 in $2 mode"
+		return 0
+	
+	elif [ -z $(echo $ROLE | tr -d [[:space:]]) ]
+	then
+		log "$FUNCNAME: Error retrieving DRBD state for resouce: [$1] - check configuration"
+		email "$FUNCNAME: Error retrieving DRBD state for resouce: [$1] - check configuration" "1"
+	
+	else
+		log "$FUNCNAME: DRBD Resource: [$1] in $ROLE mode, expected in [$2] mode"
+		email "$FUNCNAME: DRBD Resource: [$1] in $ROLE mode, expected in [$2] mode" "1"
+		return 1
+	fi
+} # End function check_drbd_resource_state
+
+function xe_wrapper () {
+	$TIMEOUT $XE_TIMEOUT /usr/bin/xe $@
+	if [ $? = "124" ]
+	then
+		log "$FUNCNAME COMMAND: xe [$@] Has reached the maximum allowable time of [$XE_TIMEOUT] seconds. Stopping"
+		email "$FUNCNAME COMMAND: xe [$@] Has reached the maximum allowable time of [$XE_TIMEOUT] seconds. Stopping" "1"
+	fi
+
+} #End Function xe_wrapper
+
+function mail_wrapper () {
+	$TIMEOUT $MAIL_TIMEOUT echo $1 | /bin/mail -s "$NOW $MAIL_SUBJECT" "$MAIL_TO" -- -r "$MAIL_FROM" -v 
+	if [ $? = "124" ]
+	then
+		log "$FUNCNAME COMMAND: mail [$@] Has reached the maximum allowable time of [$MAIL_TIMEOUT] seconds. Stopping"
+		email "$FUNCNAME COMMAND: mail [$@] Has reached the maximum allowable time of [$MAIL_TIMEOUT] seconds. Stopping" "1"
+	fi
+
+} #End Function mail_wrapper
+
+
+function auto_plug_pbd () {
+	SR_LIST=$($XE sr-list type=lvmoiscsi --minimal)
+	if [[ -n ${SR_LIST} ]]
+	then
+		log "$FUNCNAME: Found LVMoISCSI SR List: $SR_LIST"
+		RESTORE_IFS=$IFS
+		IFS=","
+		for SR_UUID in ${SR_LIST[@]}
+		do
+			PBD=`$XE pbd-list sr-uuid=$SR_UUID currently-attached=false --minimal`
+			
+			if [[ -n ${PBD} ]]
+			then
+				for PBD_UUID in ${PBD[@]}
+				do
+					$XE pbd-plug uuid=$PBD_UUID
+					if [ $? -eq 0 ]
+					then
+						log "$FUNCNAME: Successfully plugged PBD: [$PBD_UUID] SR: [$SR_UUID]"
+						email "$FUNCNAME: Successfully plugged PBD: [$PBD_UUID] SR: [$SR_UUID]" "4"
+					else
+						log "$FUNCNAME: Failed to plug PBD: [$PBD_UUID] SR: [$SR_UUID]"
+						email "$FUNCNAME: Failed to plug PBD: [$PBD_UUID] SR: [$SR_UUID]" "1"
+					fi
+				done
+			fi
+		done
+		IFS=$RESTORE_IFS
+	else
+		log "$FUNCNAME: Failed to locate LVMoISCSI SR - cannot check attach state"
+	fi
+} #End function auto_plug_pbd
+
+
+function log () {
+	if [ "$ENABLE_LOGGING" = "1" ]
+	then
+		$LOGGER -t iscsi-ha "$! $@"
+	fi
+} # End function log
+
+function email () {
+	if [ -f $MAIL_SPOOL/count ]
+	then
+		CURRENT_COUNT=`cat $MAIL_SPOOL/count`
+		if [ $CURRENT_COUNT -lt 5 ]
+		then
+			MAIL_ON=0
+			log "$FUNCNAME: iteration: $CURRENT_COUNT is less than threshold - email suppressed"
+		fi
+	fi
+	
+	if [ -e /etc/iscsi-ha/state/manual ]
+	then
+		MAIL_ON=0
+	fi
+	
+	if [ $MAIL_ON = "1" ]
+	then
+		if [ -d $MAIL_SPOOL ]
+		then
+			log "$FUNCNAME: Mail Spool Directory Found $MAIL_SPOOL"
+		else
+			mkdir $MAIL_SPOOL
+			if [ $? -eq 0 ]
+			then
+				log "$FUNCNAME: Successfully created mail spool directory $MAIL_SPOOL"
+			else
+				log "$FUNCNAME: Failed to create mail spool - not suppressing duplicate notices"
+			fi
+		fi
+		find $MAIL_SPOOL/ -name *.msg -type f -mmin +$MAIL_SCREEN_TIME -delete
+		
+		local MESSAGE_BODY="$1"
+		if [ "$2" ]
+		then
+			local ALERT_SEVERITY="$2"
+		fi
+	
+		if [ $(ls -l $MAIL_SPOOL | wc -l) -gt 1 ]
+		then
+			for MESSAGE in $MAIL_SPOOL/*.msg
+			do
+				MESSAGE_CONTENT=`cat $MESSAGE | tr -d [[:space:]]`
+				if [ "$MESSAGE_CONTENT" = $(echo $MESSAGE_BODY | tr -d [[:space:]]) ]
+				then
+					log "$FUNCNAME: Duplicate message - not sending. Content = $MESSAGE_BODY"
+					log "$FUNCNAME: Message barred for $MAIL_SCREEN_TIME minutes"
+					return 1
+				fi
+			done
+		fi
+		NOW=$(date +'%H:%M:%S:%N -> Subject:')
+	
+		if [ "$MAIL_USE_SHARED_PARAMS" -eq 1 ]
+		then
+			log "$FUNCNAME: MAIL_USE_SHARED_PARAMS is set - sourcing ha-lizard mail settings"
+			$TIMEOUT 2 ha-cfg get -l  grep 'SMTP\|MAIL' > $MAIL_SHARED_SETTINGS
+			if [ $? -eq 0 -a -e $MAIL_SHARED_SETTINGS ]
+			then
+				source $MAIL_SHARED_SETTINGS
+			fi
+		fi
+	
+		log "$FUNCNAME Sending ALERT email to $MAIL_TO: $MESSAGE_BODY"
+		MAIL_TIME=`date`
+		$MAIL "$MAIL_FROM" "$MAIL_TO" "$MAIL_SUBJECT" "$MAIL_TIME" "$PROG_NAME Version: $VERSION" "$MESSAGE_BODY" "$SMTP_SERVER" "$SMTP_PORT" "$SMTP_USER" "$SMTP_PASS"
+		
+		raise_alert "HA-Lizard Storage Controller Notice" "${MESSAGE_BODY}" "${ALERT_SEVERITY}"
+
+		MESSAGE_NAME=`date +%s`
+		touch $MAIL_SPOOL/$MESSAGE_NAME.msg
+		echo $MESSAGE_BODY > $MAIL_SPOOL/$MESSAGE_NAME.msg
+		log "$FUNCNAME: Message copied to $MAIL_SPOOL/$MESSAGE_NAME.msg - Suppressing duplicates for $MAIL_SCREEN_TIME Minutes"
+	fi
+} #End function email
+
+function make_box ()
+{
+	local STRING="$*"
+	local CHAR_HORIZONTAL="-"
+	local CHAR_VERTICAL="|"
+	local NUM_ROWS=$(echo "$*" | wc -l)
+
+	if [ $NUM_ROWS -eq 1 ]
+	then
+		local STRING_LEN=${#STRING}
+	else
+		local LENGTH=0
+		RESTORE_IFS=$IFS
+		IFS=$'\n'
+		for line in ${STRING[@]}
+		do
+			local NEW_LENGTH=${#line}
+			if [ $NEW_LENGTH -gt $LENGTH ]
+			then
+				LENGTH=$NEW_LENGTH
+			fi
+		done
+		IFS=$RESTORE_IFS
+		local STRING_LEN=$LENGTH
+	fi
+
+	local HORIZ_LEN=$(($STRING_LEN + 4))
+	
+	local COUNT=0
+	while [ $COUNT -lt $HORIZ_LEN ]
+	do
+		echo -n "$CHAR_HORIZONTAL"
+		COUNT=$(($COUNT + 1))
+	done
+
+	echo
+
+	if [ $NUM_ROWS -eq 1 ]
+	then
+		echo "$CHAR_VERTICAL $* $CHAR_VERTICAL"
+	elif [ $NUM_ROWS -gt 1 ]
+	then
+		RESTORE_IFS=$IFS
+		IFS=$'\n'
+		for line in ${STRING[@]}
+		do
+			NUM_SPACES=$(($HORIZ_LEN - ${#line} - 4))
+			COUNT=0
+			SPACE=" "
+			while [ $NUM_SPACES -gt $COUNT ]
+			do
+				SPACE="$SPACE "
+				COUNT=$(($COUNT + 1))
+			done
+			line=${line//%/%%}
+			printf "$CHAR_VERTICAL $line$SPACE$CHAR_VERTICAL\n"
+		done
+		IFS=$RESTORE_IFS
+	fi
+
+	COUNT=0
+	while [ $COUNT -lt $HORIZ_LEN ]
+	do
+		echo  -n "$CHAR_HORIZONTAL"
+		COUNT=$(($COUNT + 1))
+	done
+	echo
+} #End function make_box
+
+function make_target_drop_in () {
+	mkdir -p ${TARGET_DROP_IN_DIR}
+	> ${TARGET_DROP_IN_FILE}
+	for element in ${TGTD_DROP_IN_OPTS[@]}
+	do
+		echo $element >> ${TARGET_DROP_IN_FILE}
+	done
+	systemctl daemon-reload
+	return $?
+} #End function make_target_drop_in
+
+function service_execute () {
+	local SYSTEM_V_SCRIPTS='/etc/init.d/'
+	log "$FUNCNAME: Execute [ $2 ] on [ $1 ]"
+	if [ -e $SYSTEM_V_SCRIPTS/$1 ]
+	then
+		log "$FUNCNAME: System V mode detected"
+		local EXECUTE_SERVICE=$(which service)
+		RESULT=$(${EXECUTE_SERVICE} $1 $2)
+		RETVAL=$?
+		log "$FUNCNAME: $RESULT"
+		log "$FUNCNAME: Returning exit status [ $RETVAL ]"
+		SERVICE_EXECUTE_RESULT=$RESULT
+		echo "$SERVICE_EXECUTE_RESULT"
+		return $RETVAL
+	else
+		log "$FUNCNAME: systemctl mode being used"
+		local EXECUTE_SERVICE=$(which systemctl)
+		RESULT=$(${EXECUTE_SERVICE} $2 $1)
+		RETVAL=$?
+		log "$FUNCNAME: $RESULT"
+		log "$FUNCNAME: Returning exit status [ $RETVAL ]"
+		SERVICE_EXECUTE_RESULT=$RESULT
+		echo "$SERVICE_EXECUTE_RESULT"
+		return $RETVAL
+	fi
+} # End function service_execute
+
+
+function send_replication_network_arp () {
+	log "$FUNCNAME: Sending ARP update to peer"
+
+	local MY_REPLICATION_IP_ADDRESSES=$(ip -4 -f inet addr show $DRBD_INTERFACE | grep inet | awk {'print $2'} | awk -F '/' {'print $1'})
+	log "$FUNCNAME: IP address list for [ $DRBD_INTERFACE ] = [ ${MY_REPLICATION_IP_ADDRESSES[@]} ]"
+	for this_ip_address in ${MY_REPLICATION_IP_ADDRESSES[@]}
+	do
+		log "$FUNCNAME: Updating ARP for device [ $DRBD_INTERFACE ] IP [ $this_ip_address ]"
+		$ARPING -U -I $DRBD_INTERFACE -U $this_ip_address -c 2 -w 2
+	done
+
+} #End function send_replication_network_arp
+
+
+function send_network_bridge_arp_all_members () {
+
+	if [ ! $1 ]
+	then
+		log "$FUNCNAME: Missing mandatory argument [ bridge_name ]"
+		return 1
+	fi
+	log "$FUNCNAME: Processing ARP update for interface [ $1 ]"
+
+	local SUCCESS=true
+	local BRIDGE_NAME=$1
+	local THIS_HOST_UUID=$(xe host-list hostname=$(hostname) --minimal)
+	local THIS_NETWORK_UUID=$(xe network-list bridge=$BRIDGE_NAME --minimal)
+	local THIS_NETWORK_PIF=$(xe pif-list network-uuid=$THIS_NETWORK_UUID host-uuid=$THIS_HOST_UUID --minimal)
+	local THIS_NETWORK_PIF_IS_PYSICAL=$(xe pif-param-get uuid=$THIS_NETWORK_PIF param-name=physical)
+
+
+	if [ "$THIS_NETWORK_PIF_IS_PYSICAL" = "true" ]
+	then
+		log "$FUNCNAME: This is not a bond - getting device name"
+		local THIS_NETWORK_PIF_NAME=$(xe pif-param-get uuid=$THIS_NETWORK_PIF param-name=device)
+		log "$FUNCNAME: Device name found [ $THIS_NETWORK_PIF_NAME ]"
+		
+		local THIS_BRIDGE_IP_ADDRESSES=$(ip -4 -f inet addr show $BRIDGE_NAME | grep inet | awk {'print $2'} | awk -F '/' {'print $1'})
+		log "$FUNCNAME: IP address list for [ $THIS_NETWORK_PIF_NAME ] = [ ${THIS_BRIDGE_IP_ADDRESSES[@]} ]"
+		for this_ip_address in ${THIS_BRIDGE_IP_ADDRESSES[@]}
+		do
+			log "$FUNCNAME: Updating ARP for device [ $THIS_NETWORK_PIF_NAME ] IP [ $this_ip_address ]"
+			$ARPING -U -I $THIS_NETWORK_PIF_NAME $this_ip_address -c 1
+			RETVAL=$?
+			if [ $RETVAL -ne 0 ]
+			then
+				log "$FUNCNANE: Error sending ARP for device [ $THIS_NETWORK_PIF_NAME ] IP [ $this_ip_address ]"
+				local SUCCESS=false
+			fi
+		done
+
+	else
+		log "$FUNCNAME: Checking if interface is a bond"
+		local THIS_PIF_BOND_MASTER_OF=$(xe pif-param-get uuid=$THIS_NETWORK_PIF param-name=bond-master-of)
+		if [ ${#THIS_PIF_BOND_MASTER_OF} -eq 36 ]
+		then
+			log "$FUNCNAME: Bond UUID [ $THIS_PIF_BOND_MASTER_OF ] validated - fetching bond device list"
+			local THIS_BOND_DEVICE_UUID_LIST=$(xe bond-param-get uuid=$THIS_PIF_BOND_MASTER_OF param-name=slaves | tr -d ';')
+			for pif_uuid in ${THIS_BOND_DEVICE_UUID_LIST[@]}
+			do
+				local THIS_DEVICE_NAME=$(xe pif-param-get uuid=$pif_uuid param-name=device)
+				log "$FUNCNAME: Device name found [ $THIS_DEVICE_NAME ]"
+
+				local THIS_BRIDGE_IP_ADDRESSES=$(ip -4 -f inet addr show $BRIDGE_NAME | grep inet | awk {'print $2'} | awk -F '/' {'print $1'})
+				log "$FUNCNAME: IP address list for [ $THIS_DEVICE_NAME ] = [ ${THIS_BRIDGE_IP_ADDRESSES[@]} ]"
+				for this_ip_address in ${THIS_BRIDGE_IP_ADDRESSES[@]}
+				do
+					log "$FUNCNAME: Updating ARP for device [ $THIS_DEVICE_NAME ] IP [ $this_ip_address ]"
+					$ARPING -U -I $THIS_DEVICE_NAME $this_ip_address -c 1
+					RETVAL=$?
+					if [ $RETVAL -ne 0 ]
+					then
+						log "$FUNCNANE: Error sending ARP for device [ $THIS_NETWORK_PIF_NAME ] IP [ $this_ip_address ]"
+						local SUCCESS=false
+					fi
+				done
+			done
+		else
+			log "$FUNCNAME: ERROR detecting link interface(s) for [ $DRBD_INTERFACE ]"
+		fi
+	fi
+
+	if [ $SUCCESS = "true" ]
+	then
+		return 0
+	else
+		return 1
+	fi
+} #End function send_network_bridge_arp_all_members
+
+
+function send_network_bridge_arp () {
+	if [ ! $1 ]
+	then
+		log "$FUNCNAME: Missing mandatory argument [ bridge_name ]"
+		return 1
+	fi
+	log "$FUNCNAME: Processing ARP update for interface [ $1 ]"
+	local SUCCESS=true
+	local BRIDGE_NAME=$1
+
+	local THIS_BRIDGE_IP_ADDRESSES=$(ip -4 -f inet addr show $BRIDGE_NAME | grep inet | awk {'print $2'} | awk -F '/' {'print $1'})
+	log "$FUNCNAME: IP address list for [ $BRIDGE_NAME ] = [ ${THIS_BRIDGE_IP_ADDRESSES[@]} ]"
+	for this_ip_address in ${THIS_BRIDGE_IP_ADDRESSES[@]}
+	do
+		log "$FUNCNAME: Updating ARP for device [ $BRIDGE_NAME ] IP [ $this_ip_address ]"
+		$ARPING -U -I $BRIDGE_NAME $this_ip_address -c 1
+		RETVAL=$?
+		if [ $RETVAL -ne 0 ]
+		then
+			log "$FUNCNANE: Error sending ARP for device [ $BRIDGE_NAME ] IP [ $this_ip_address ]"
+			local SUCCESS=false
+		fi
+	done
+
+
+	if [ $SUCCESS = "true" ]
+	then
+		return 0
+	else
+		return 1
+	fi
+
+} #End function send_network_bridge_arp
+
+
+function validate_drbd_resources_loaded ()
+{
+	local DRBD_LOAD_STATE=$(cat /proc/drbd | wc -l)
+	log "$FUNCNAME: Checking DRBD has loaded with resources. Checking [ ${DRBD_LOAD_STATE} ] > [ 2 ]"		
+	if [ "${DRBD_LOAD_STATE}" -le 2 ]
+	then
+		log "$FUNCNAME: No resources loaded"
+		return 1
+	else
+		log "$FUNCNAME: Resources loaded"
+		return 0
+	fi
+} #End function validate_drbd_resources_loaded
+
+function raise_alert ()
+{
+	log "$FUNCNAME: Raising system alert"
+	if [ ! "$3" ]
+	then
+		log "$FUNCNAME: Missing required arguments"
+		return 1
+	fi
+
+	local HA_CFG='/etc/ha-lizard/scripts/ha-cfg'
+
+	if [ ! -e ${HA_CFG} ]
+	then
+		log "$FUNCNAME: ha-cfg is not installed - cannot send alert"
+		return 1
+	else
+		local ALERT_NAME="$1"
+		local ALERT_BODY="$2"
+		local ALERT_SEVERITY="$3"
+		log "$FUNCNAME: ALERT_NAME [${ALERT_NAME}]"
+		log "$FUNCNAME: ALERT_BODY [${ALERT_BODY}]"
+		log "$FUNCNAME: ALERT_SEVERITY [${ALERT_SEVERITY}]"
+		${HA_CFG} raise-alert "${ALERT_NAME}" "${ALERT_BODY}" "${ALERT_SEVERITY}"
+		return $?
+	fi
+} #End function raise_alert
+
+function replication_link_check ()
+{
+	local INTERFACE=$1
+
+	local SUCCESS=true
+
+	which networkd_db &>/dev/null || SUCCESS=false
+
+	if [ "$SUCCESS" = "true" ]
+	then
+		eval $(networkd_db -bridge ${INTERFACE})
+		log "$FUNCNAME: Interfaces list set to [$interfaces]"
+		if [ ! $interfaces ]
+		then
+			SUCCESS=false
+		fi
+	fi
+
+	if [ $SUCCESS = "true" ]
+	then
+		local NUM_INTERFACES=$(echo $interfaces | awk -F ',' {'print NF'})
+		log "$FUNCNAME: Number of interfaces for [$INTERFACE] = [$NUM_INTERFACES]"
+		local PRIMARY_INTERFACE=$(echo $interfaces | awk -F ',' {'print $1'})
+		log "$FUNCNAME: primary interface set to [$PRIMARY_INTERFACE]"
+	fi
+
+	if [ $SUCCESS = "true" ]
+	then
+		LINK_STATE=down
+		declare -A LINK_STATE_ARRAY
+		log "$FUNCNAME: Working interface list [$interfaces]"
+		for dev in ${interfaces//,/ }
+		do
+			THIS_STATE=$(cat /sys/class/net/${dev}/operstate)
+			log "$FUNCNAME: Linkstate for [$dev] is [$THIS_STATE]"
+			if [ "$THIS_STATE" = "up" ]
+			then
+				LINK_STATE_ARRAY[$dev]=up
+				LINK_STATE=up
+			else
+				LINK_STATE_ARRAY[$dev]=down
+			fi
+		done
+
+		if [ ${LINK_STATE_ARRAY[$PRIMARY_INTERFACE]} != "up" ]
+		then
+			SUCCESS=false
+			log "$FUNCNAME: Primary interface [$PRIMARY_INTERFACE] is down - looking for another interface in the up state"
+			for alt_dev in ${interfaces//,/ }
+			do
+				if [ "${LINK_STATE_ARRAY[$alt_dev]}" = "up" ]
+				then
+					log "$FUNCNAME: Found device [$alt_dev] in up state. Setting primary interface to [$alt_dev]"
+					PRIMARY_INTERFACE=$alt_dev
+					SUCCESS=true
+					break
+				fi
+			done
+		fi
+
+	fi
+
+	if [ "$SUCCESS" = "true" ] && [ "$LINK_STATE" = "up" ] && [ "$NUM_INTERFACES" -gt 1 ]
+	then
+		local LOCAL_REPL_IP_LIST=$(ip -o -4 addr show ${INTERFACE} | awk -F 'brd' {'print $1'} | grep --only-matching -E "[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}")
+		local LOCAL_REPL_IP=$(echo ${LOCAL_REPL_IP_LIST/$DRBD_VIRTUAL_IP/} | tr -d [[:space:]])
+		local REPL_IP_LIST=$(cat /etc/drbd.conf | grep --only-matching -E "[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}" | sort | uniq)
+		local PEER_REPL_IP=$(echo ${REPL_IP_LIST/$LOCAL_REPL_IP/} | tr -d [[:space:]])
+		log "FUNCNAME: Local repl IP = [$LOCAL_REPL_IP] Peer repl IP = [$PEER_REPL_IP]"
+
+		if [[ $PEER_REPL_IP =~ [0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3} ]]
+		then
+			log "$FUNCNAME: Valid peer replication IP found [$PEER_REPL_IP]"
+			check_ip_health $PEER_REPL_IP 1
+			RETVAL=$?
+			if [ $RETVAL -ne 0 ]
+			then
+				log "$FUNCNAME: Peer replication interface on [$PEER_REPL_IP] is not responding"
+
+				if [ $NUM_INTERFACES -gt 2 ]
+				then
+					restore_replication_link $INTERFACE $interfaces
+				else
+					restore_replication_link $INTERFACE $PRIMARY_INTERFACE
+				fi
+			else
+				log "$FUNCNAME: Peer replication interface on [$PEER_REPL_IP] OK"
+			fi
+		fi
+	else
+		log "Link state for [$INTERFACE] is [$LINK_STATE]. Nothing to do"
+	fi
+
+} #End function replication_link_check
+
+
+restore_replication_link ()
+{
+	local SUCCESS=true
+	local INTERFACE=$1
+	if [ "$2" ]
+	then
+		local PRIMARY_INTERFACE=$2
+	else
+		SUCCESS=false
+	fi
+
+	if [ $SUCCESS = "true" ]
+	then
+		local THIS_HOST_UUID=$($TIMEOUT 2 xe host-list hostname=$(hostname) --minimal) || SUCCESS=false
+		local NETWORK_UUID=$(xe network-list bridge=$INTERFACE --minimal)
+		log "$FUNCNAME: Found network uuid [$NETWORK_UUID]"
+	fi
+
+	if [ ${#NETWORK_UUID} -ne 36 ]
+	then
+		SUCCESS=false
+	fi
+
+	if [ $SUCCESS = "true" ]
+	then
+		local REPL_LINK_PIF_UUID=$(xe pif-list host-uuid=${THIS_HOST_UUID} network-uuid=${NETWORK_UUID} --minimal)
+		log "$FUNCNAME: Found PIF uuid [$REPL_LINK_PIF_UUID]"
+	fi
+
+	if [ ${#REPL_LINK_PIF_UUID} -ne 36 ]
+	then
+		SUCCESS=false
+	fi
+
+	if [ $SUCCESS = "true" ]
+	then
+		local REPL_LINK_BOND_UUID=$(xe bond-list master=$REPL_LINK_PIF_UUID --minimal)
+		log "$FUNCNAME: Found bond uuid [$REPL_LINK_BOND_UUID]"
+	fi
+
+	if [ ${#REPL_LINK_BOND_UUID} -ne 36 ]
+	then
+		SUCCESS=false
+	fi
+
+	if [ $SUCCESS = "true" ]
+	then
+		local BOND_MODE=$(xe bond-param-get uuid=${REPL_LINK_BOND_UUID} param-name=mode)
+		log "$FUNCNAME: Bond mode = [$BOND_MODE]"
+	fi
+
+	if [ "$SUCCESS" = "true" ] && [ "$BOND_MODE" = "balance-slb" -o "$BOND_MODE" = "active-backup" ] 
+	then
+		log "$FUNCNAME: All conditions met to attempt restoration of replication link"
+		if [[ $PRIMARY_INTERFACE =~ , ]]
+		then
+			log "$FUNCNAME: Working multiple interfaces"
+			for this_if in ${PRIMARY_INTERFACE//,/ }
+			do
+				log "$FUNCNAME: bringing down [$this_if]"
+				ifconfig $this_if down &>/dev/null
+			done
+			for this_if in ${PRIMARY_INTERFACE//,/ }
+			do
+				log "$FUNCNAME: bringing up [$this_if]"
+				ifconfig $this_if up &>/dev/null
+			done
+		else
+			log "$FUNCNAME: Resetting [$PRIMARY_INTERFACE]"
+			ifconfig $PRIMARY_INTERFACE down &>/dev/null && ifconfig $PRIMARY_INTERFACE up &>/dev/null
+		fi
+	else
+		log "$FUNCNAME: Conditions not met to attempt restoration of replication link"
+		log "$FUNCNAME: SUCCESS=[$SUCCESS] NUM_INTERFACES=[$NUM_INTERFACES] BOND_MODE=[$BOND_MODE] LINK_STATE=[$LINK_STATE]"
+	fi
+
+
+} #End function restore_replication_link
