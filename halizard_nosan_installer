@@ -514,8 +514,8 @@ echo '#######################
 #######################
 [ha-lizard-base]
 name=CentOS-$releasever - ha-lizard
+baseurl=http://linuxsoft.cern.ch/centos-vault/centos/7/os/$basearch/
 mirrorlist=http://mirrorlist.centos.org/?release=7&arch=$basearch&repo=os&infra=$infra
-baseurl=http://mirror.centos.org/centos/7/os/$basearch/
 enabled=0
 gpgcheck=0
 
@@ -524,7 +524,7 @@ gpgcheck=0
 #######################
 [ha-lizard-epel]
 name=Extra Packages for Enterprise Linux 7 - $basearch
-#baseurl=http://download.fedoraproject.org/pub/epel/7/$basearch
+baseurl=https://fedora-archive.ip-connect.info/epel/7/$basearch
 mirrorlist=https://mirrors.fedoraproject.org/metalink?repo=epel-7&arch=$basearch
 failovermethod=priority
 enabled=0
@@ -538,11 +538,7 @@ gpgcheck=0
 
 [ha-lizard-elrepo]
 name=ELRepo.org Community Enterprise Linux Repository - el7
-baseurl=http://elrepo.org/linux/elrepo/el7/$basearch/
-        http://mirrors.coreix.net/elrepo/elrepo/el7/$basearch/
-        http://jur-linux.org/download/elrepo/elrepo/el7/$basearch/
-        http://repos.lax-noc.com/elrepo/elrepo/el7/$basearch/
-        http://mirror.ventraip.net.au/elrepo/elrepo/el7/$basearch/
+baseurl=http://ftp.scientificlinux.org/linux/elrepo/archive/elrepo/el7/$basearch/
 mirrorlist=http://mirrors.elrepo.org/mirrors-elrepo.el7
 enabled=0
 gpgcheck=0
@@ -565,7 +561,7 @@ fi
 echo "Checking for latest releases of HA-Lizard components"
 ISCSIHA_RELEASE=`curl -4s $HALIZARD_MIRROR_URL/iscsi-ha/current_release`
 HALIZARD_RELEASE=`curl -4s $HALIZARD_MIRROR_URL/ha-lizard/current_release`
-ISCSIHA_RPM_RELEASE=`curl -4s $HALIZARD_MIRROR_URL/iscsi-ha/current_rpm_release`
+ISCSIHA_RPM_RELEASE="iscsi-ha-2.2.7-1.rpm"
 HALIZARD_RPM_RELEASE=`curl -4s $HALIZARD_MIRROR_URL/ha-lizard/current_rpm_release`
 
 echo -e "Found: $ISCSIHA_RELEASE $HALIZARD_RELEASE"
@@ -885,10 +881,12 @@ do
 	echo "Backing up LVM configuration file $lvm_conf to $lvm_conf.halizard_restore"
 	cp  $lvm_conf $lvm_conf.halizard_restore
 	
+	LV_OLD_FILTER='filter = \[ "r\|\/dev\/nbd\|" \]'
 	LV_FILTER="    filter = [ \"r|$BLOCK_DEVICE|\", \"r|/dev/drbd1|\" ]"
-	LVM_DEVICES_LINE_BEGIN=$(cat -n $lvm_conf | grep 'devices {' | awk {'print $1'})
-	LVM_INSERT_ROW_NUMBER=$(( $LVM_DEVICES_LINE_BEGIN + 1 ))
-
+	LVM_FILTER_LINE=$(cat -n $lvm_conf | grep -E "${LV_OLD_FILTER}" | awk {'print $1'})
+	LVM_INSERT_ROW_NUMBER=$(( $LVM_FILTER_LINE + 1 ))
+    
+	sed -i -E "s/${LV_OLD_FILTER}/#${LV_OLD_FILTER}/g" $lvm_conf
 	sed -i "${LVM_INSERT_ROW_NUMBER}i $LV_FILTER" $lvm_conf
 done
 
