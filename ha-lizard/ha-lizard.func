@@ -325,14 +325,14 @@ function check_xapi ()
 	ping -c 1 -w 2 $1 1> /dev/null
 	if [ $? -eq 0 ]
 	then
-		XAPI_RESP=$(curl --silent $1 | grep -c -E "XO Lite")
+		XAPI_RESP=$(curl --silent $1 | grep -c -E "Citrix|XCP|XO Lite")
 		log $FUNCNAME "Pool Host $1 xapi status = $XAPI_RESP"
 		if [ $XAPI_RESP -ge 1 ]
 			then
 			return 0
 		else
 			log $FUNCNAME: "HTTP check failed - attempting HTTPS"
-			XAPI_RESP=$(curl -k --silent https://${1} | grep -c -E "XO Lite")
+			XAPI_RESP=$(curl -k --silent https://${1} | grep -c -E "Citrix|XCP|XO Lite")
 			log $FUNCNAME "Pool Host $1 xapi status = $XAPI_RESP"
 			if [ $XAPI_RESP -ge 1 ]
 				then

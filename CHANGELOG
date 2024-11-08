@@ -1,0 +1,9 @@
+ha-lizard.func
+- chagne grep string in check_xapi func to support XCP-ng 8.3
+
+halizard_nosan_installer
+- Change address in generated yum repository list to live repos
+- LVM filter update to work with XCP-ng 8.3
+
+iscsi-ha.sh
+- unset correction

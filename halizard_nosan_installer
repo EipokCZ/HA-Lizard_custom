@@ -868,7 +868,7 @@ echo "############### BEGIN HALIZARD INSERTION ###############
 for lvm_conf in ${LVM_CONF[@]}
 do
 	LVM_CONF_BU_NAME=${lvm_conf//\//_}
-	
+    ISVER83=$(grep -i "8.3" /etc/system-release | awk {'print $3'})
 
 	cp $lvm_conf $TMP_LOCATION/$INSTALL_UID/$LVM_CONF_BU_NAME
 	
@@ -881,13 +881,21 @@ do
 	echo "Backing up LVM configuration file $lvm_conf to $lvm_conf.halizard_restore"
 	cp  $lvm_conf $lvm_conf.halizard_restore
 	
-	LV_OLD_FILTER='filter = \[ "r\|\/dev\/nbd\|" \]'
 	LV_FILTER="    filter = [ \"r|$BLOCK_DEVICE|\", \"r|/dev/drbd1|\" ]"
-	LVM_FILTER_LINE=$(cat -n $lvm_conf | grep -E "${LV_OLD_FILTER}" | awk {'print $1'})
-	LVM_INSERT_ROW_NUMBER=$(( $LVM_FILTER_LINE + 1 ))
+	LV_OLD_FILTER='filter = \[ "r\|\/dev\/nbd\|" \]'
+	if [ $VER83 ]
+	then
+		LVM_FILTER_LINE=$(cat -n $lvm_conf | grep -E "${LV_OLD_FILTER}" | awk {'print $1'})
+		LVM_INSERT_ROW_NUMBER=$(( $LVM_FILTER_LINE + 1 ))
     
-	sed -i -E "s/${LV_OLD_FILTER}/#${LV_OLD_FILTER}/g" $lvm_conf
-	sed -i "${LVM_INSERT_ROW_NUMBER}i $LV_FILTER" $lvm_conf
+		sed -i -E "s/${LV_OLD_FILTER}/#${LV_OLD_FILTER}/g" $lvm_conf
+		sed -i "${LVM_INSERT_ROW_NUMBER}i $LV_FILTER" $lvm_conf
+	else
+		LVM_DEVICES_LINE_BEGIN=$(cat -n $lvm_conf | grep 'devices {' | awk {'print $1'})
+		LVM_INSERT_ROW_NUMBER=$(( $LVM_DEVICES_LINE_BEGIN + 1 ))
+
+		sed -i "${LVM_INSERT_ROW_NUMBER}i $LV_FILTER" $lvm_conf
+	fi
 done
 
 ###################################
