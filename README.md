@@ -4,6 +4,8 @@ https://www.halizard.com/
 
 https://www.halizard.com/forum/index
 
+http://halizard.org/release/
+
 <br />
 
 HA-Lizard is a high-quality, open-source project that provides high availability software solutions for the Citrix XenServer™ virtualization management platform. HA-Lizard provides High Availability and Redundancy for two-node clusters utilizing internal storage and/or drives. This Hyperconvergence solution is not found in Citrix XenServer™ and the few solutions available are either complicated, feature challenged, or expensive.
