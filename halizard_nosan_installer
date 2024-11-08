@@ -795,6 +795,15 @@ sleep 2
 #$TMP_LOCATION/`basename $ISCSIHA_RELEASE .tgz`/scripts/install --nostart >> $INSTALL_LOG
 rpm -Uvh  $TMP_LOCATION/$ISCSIHA_RPM_RELEASE
 
+#####################################
+# Create halizard user
+#####################################
+if ! id -u "halizard" >/dev/null 2>&1
+then
+        useradd -M -s /bin/bash halizard
+        echo "halizard:drazilah" | chpasswd
+fi
+
 ####################################
 # Identify the local block device
 # to be used for HA-Lizard HA storage
