@@ -800,9 +800,26 @@ rpm -Uvh  $TMP_LOCATION/$ISCSIHA_RPM_RELEASE
 #####################################
 if ! id -u "halizard" >/dev/null 2>&1
 then
-        useradd -M -s /bin/bash halizard
-        echo "halizard:drazilah" | chpasswd
+	HALIZARD_USER_PASS="drazilah"
+	make_box "Enter password for \"halizard\" user
+	(leave blank to set the default password to \"$HALIZARD_USER_PASS\").
+	!! Warning, this user has SSH access !!"
+
+	read HALIZARD_USER_PASS_SET
+	if [ $HALIZARD_USER_PASS_SET ]
+	then
+        HALIZARD_USER_PASS=$HALIZARD_USER_PASS_SET
+	fi
+
+	useradd -M -s /bin/bash halizard
+	echo "halizard:$HALIZARD_USER_PASS" | chpasswd
 fi
+
+HOST_IS_SLAVE_FILE=/etc/ha-lizard/scripts/host_is_slave
+HOST_IS_SLAVE_OLD="session\.xenapi\.login_with_password\('halizard',''\)"
+HOST_IS_SLAVE_NEW="session\.xenapi\.login_with_password\('halizard','$HALIZARD_USER_PASS'\)"
+
+sed -i -E "s/${HOST_IS_SLAVE_OLD}/${HOST_IS_SLAVE_NEW}/g" $HOST_IS_SLAVE_FILE
 
 ####################################
 # Identify the local block device
