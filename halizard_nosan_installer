@@ -1,6 +1,6 @@
 #!/bin/bash
 ##################################################
-# HA-Lizard noSAN Installer version 2.1.9
+# HA-Lizard noSAN Installer version 2.2.2
 ##################################################
 #################################################################################################
 #
@@ -515,7 +515,7 @@ echo '#######################
 [ha-lizard-base]
 name=CentOS-$releasever - ha-lizard
 baseurl=http://linuxsoft.cern.ch/centos-vault/centos/7/os/$basearch/
-mirrorlist=http://mirrorlist.centos.org/?release=7&arch=$basearch&repo=os&infra=$infra
+#mirrorlist=http://mirrorlist.centos.org/?release=7&arch=$basearch&repo=os&infra=$infra
 enabled=0
 gpgcheck=0
 
@@ -525,7 +525,7 @@ gpgcheck=0
 [ha-lizard-epel]
 name=Extra Packages for Enterprise Linux 7 - $basearch
 baseurl=https://fedora-archive.ip-connect.info/epel/7/$basearch
-mirrorlist=https://mirrors.fedoraproject.org/metalink?repo=epel-7&arch=$basearch
+#mirrorlist=https://mirrors.fedoraproject.org/metalink?repo=epel-7&arch=$basearch
 failovermethod=priority
 enabled=0
 gpgcheck=0
@@ -539,7 +539,7 @@ gpgcheck=0
 [ha-lizard-elrepo]
 name=ELRepo.org Community Enterprise Linux Repository - el7
 baseurl=http://ftp.scientificlinux.org/linux/elrepo/archive/elrepo/el7/$basearch/
-mirrorlist=http://mirrors.elrepo.org/mirrors-elrepo.el7
+#mirrorlist=http://mirrors.elrepo.org/mirrors-elrepo.el7
 enabled=0
 gpgcheck=0
 protect=0' > /etc/yum.repos.d/ha-lizard.repo
